@@ -159,6 +159,32 @@ export class ChatAnonymizer {
         return out;
     }
 
+    /**
+     * Restore placeholders back to their original text. Used by tabular
+     * review to display real values in cells while still ensuring the
+     * upstream LLM only ever saw placeholders. No LLM call, no fuzziness
+     * — straight string replace.
+     *
+     * The LLM may have slightly rewritten placeholders (e.g. dropped the
+     * braces). We only restore the canonical {TYPE_N} form; partial /
+     * malformed placeholders are left as-is so the user can spot them.
+     */
+    restoreText(text: string): string {
+        if (this.placeholderInfo.size === 0) return text;
+        // Sort longest-first so {PERSON_10} beats {PERSON_1} when both are
+        // present (the {PERSON_1} prefix would otherwise match first).
+        const sorted = [...this.placeholderInfo.keys()].sort(
+            (a, b) => b.length - a.length,
+        );
+        let out = text;
+        for (const ph of sorted) {
+            const info = this.placeholderInfo.get(ph);
+            if (!info?.value) continue;
+            out = out.split(ph).join(info.value);
+        }
+        return out;
+    }
+
     /** Snapshot of all prepared docs — useful for response metadata. */
     snapshot(): {
         documents: PreparedDoc[];

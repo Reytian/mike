@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { streamChat, streamProjectChat } from "@/app/lib/mikeApi";
+import { readAnonymizePrefs } from "@/app/lib/anonymizePrefs";
 import { useChatHistoryContext } from "@/app/contexts/ChatHistoryContext";
 import { useGenerateChatTitle } from "./useGenerateChatTitle";
 import type {
@@ -350,22 +351,8 @@ export function useAssistantChat({
                 document_id: f.document_id as string,
             }));
 
-            // Read the auto-anonymize toggle from localStorage. Toggle via:
-            //   localStorage.setItem("mike.anonymize_before_send", "true")
-            //   localStorage.setItem("mike.anonymize_target", "auto"|"local"|"macmini")
-            // A proper UI toggle is a follow-up; this lets the user test the
-            // feature now without prop-drilling state through every chat caller.
-            const anonymizeBeforeSend =
-                typeof window !== "undefined" &&
-                window.localStorage.getItem("mike.anonymize_before_send") === "true";
-            const anonymizeTargetRaw =
-                typeof window !== "undefined"
-                    ? window.localStorage.getItem("mike.anonymize_target")
-                    : null;
-            const anonymizeTarget: "auto" | "local" | "macmini" =
-                anonymizeTargetRaw === "local" || anonymizeTargetRaw === "macmini"
-                    ? anonymizeTargetRaw
-                    : "auto";
+            const { anonymizeBeforeSend, anonymizeTarget } =
+                readAnonymizePrefs();
 
             const response = await (projectId
                 ? streamProjectChat({

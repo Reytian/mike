@@ -653,13 +653,22 @@ export async function deleteTabularReview(reviewId: string): Promise<void> {
 
 export async function streamTabularGeneration(
     reviewId: string,
+    options: {
+        anonymizeBeforeSend?: boolean;
+        anonymizeTarget?: "auto" | "local" | "macmini";
+    } = {},
 ): Promise<Response> {
     const authHeaders = await getAuthHeader();
     return fetch(`${API_BASE}/tabular-review/${reviewId}/generate`, {
         method: "POST",
-        headers: { ...authHeaders },
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({
+            anonymize_before_send: options.anonymizeBeforeSend ?? false,
+            anonymize_target: options.anonymizeTarget ?? "auto",
+        }),
     });
 }
+
 
 export async function streamTabularChat(
     reviewId: string,
@@ -766,6 +775,10 @@ export async function regenerateTabularCell(
     reviewId: string,
     documentId: string,
     columnIndex: number,
+    options: {
+        anonymizeBeforeSend?: boolean;
+        anonymizeTarget?: "auto" | "local" | "macmini";
+    } = {},
 ): Promise<{
     summary: string;
     flag: "green" | "grey" | "yellow" | "red";
@@ -777,6 +790,8 @@ export async function regenerateTabularCell(
         body: JSON.stringify({
             document_id: documentId,
             column_index: columnIndex,
+            anonymize_before_send: options.anonymizeBeforeSend ?? false,
+            anonymize_target: options.anonymizeTarget ?? "auto",
         }),
     });
 }

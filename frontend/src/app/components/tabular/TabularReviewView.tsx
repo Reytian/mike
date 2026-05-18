@@ -15,6 +15,7 @@ import {
     updateTabularReview,
     uploadReviewDocument,
 } from "@/app/lib/mikeApi";
+import { readAnonymizePrefs } from "@/app/lib/anonymizePrefs";
 import type {
     ColumnConfig,
     MikeDocument,
@@ -243,6 +244,7 @@ export function TRView({ reviewId, projectId }: Props) {
                 reviewId,
                 docId,
                 colIndex,
+                readAnonymizePrefs(),
             );
             setCells((prev) =>
                 prev.map((c) =>
@@ -285,7 +287,10 @@ export function TRView({ reviewId, projectId }: Props) {
         setGenerating(true);
 
         try {
-            const response = await streamTabularGeneration(reviewId);
+            const response = await streamTabularGeneration(
+                reviewId,
+                readAnonymizePrefs(),
+            );
             if (!response.ok) {
                 const payload = await response.json().catch(() => null);
                 const provider =

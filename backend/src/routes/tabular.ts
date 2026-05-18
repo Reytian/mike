@@ -24,6 +24,8 @@ import {
     filterAccessibleDocumentIds,
     listAccessibleProjectIds,
 } from "../lib/access";
+import { ChatAnonymizer } from "../lib/anonymizer/chatAnonymizer";
+import type { AnonymizerTarget } from "../lib/anonymizer/types";
 
 function formatPromptSuffix(format?: string, tags?: string[]): string {
     switch (format) {
@@ -770,20 +772,49 @@ tabularRouter.post(
             .eq("document_id", document_id)
             .eq("column_index", column_index);
 
+        const reqBody = (req.body && typeof req.body === "object"
+            ? (req.body as Record<string, unknown>)
+            : {}) as { anonymize_before_send?: unknown; anonymize_target?: unknown };
+        const anonymizeBeforeSend = reqBody.anonymize_before_send === true;
+        const anonymizeTargetRaw = reqBody.anonymize_target;
+        const anonymizeTarget: AnonymizerTarget =
+            anonymizeTargetRaw === "local" || anonymizeTargetRaw === "macmini"
+                ? anonymizeTargetRaw
+                : "auto";
+
         let markdown = "";
+        let cellAnonymizer: ChatAnonymizer | undefined;
         if (docActive) {
             const buf = await downloadFile(docActive.storage_path);
             if (buf) {
                 try {
-                    markdown =
-                        (doc.file_type as string) === "pdf"
-                            ? await extractPdfMarkdown(buf)
-                            : await extractDocxMarkdown(buf);
+                    if (anonymizeBeforeSend) {
+                        cellAnonymizer = new ChatAnonymizer({
+                            target: anonymizeTarget,
+                        });
+                        const prep = await cellAnonymizer.prepareDocument(
+                            document_id,
+                            doc.filename as string,
+                            Buffer.from(buf),
+                            (doc.file_type as string) === "pdf"
+                                ? "application/pdf"
+                                : (doc.file_type as string) === "docx"
+                                  ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                  : "text/plain",
+                        );
+                        markdown = prep.anonymizedText;
+                    } else {
+                        markdown =
+                            (doc.file_type as string) === "pdf"
+                                ? await extractPdfMarkdown(buf)
+                                : await extractDocxMarkdown(buf);
+                    }
                 } catch (err) {
                     console.error(
                         `[regenerate-cell] extraction error doc=${document_id}`,
                         err,
                     );
+                    if (anonymizeBeforeSend) markdown = "";
                 }
             }
         }
@@ -808,14 +839,24 @@ tabularRouter.post(
             return void res.status(500).json({ detail: "Generation failed" });
         }
 
+        const restored = cellAnonymizer
+            ? {
+                  summary: cellAnonymizer.restoreText(result.summary),
+                  flag: result.flag,
+                  reasoning: cellAnonymizer.restoreText(
+                      result.reasoning ?? "",
+                  ),
+              }
+            : result;
+
         await db
             .from("tabular_cells")
-            .update({ content: JSON.stringify(result), status: "done" })
+            .update({ content: JSON.stringify(restored), status: "done" })
             .eq("review_id", reviewId)
             .eq("document_id", document_id)
             .eq("column_index", column_index);
 
-        res.json(result);
+        res.json(restored);
     },
 );
 
@@ -896,27 +937,75 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
 
     const write = (line: string) => res.write(line);
 
+    // Auto-anonymize before sending docs to the cloud tabular model.
+    // Read request body (PARSE earlier in the route is OK because Express
+    // always parses JSON before the handler runs).
+    const reqBody = (req.body && typeof req.body === "object"
+        ? (req.body as Record<string, unknown>)
+        : {}) as { anonymize_before_send?: unknown; anonymize_target?: unknown };
+    const anonymizeBeforeSend = reqBody.anonymize_before_send === true;
+    const anonymizeTargetRaw = reqBody.anonymize_target;
+    const anonymizeTarget: AnonymizerTarget =
+        anonymizeTargetRaw === "local" || anonymizeTargetRaw === "macmini"
+            ? anonymizeTargetRaw
+            : "auto";
+
+    if (anonymizeBeforeSend) {
+        write(
+            `data: ${JSON.stringify({
+                type: "anonymize_mode",
+                target: anonymizeTarget,
+            })}\n\n`,
+        );
+    }
+
     try {
         await Promise.all(
             docs.map(async (doc) => {
                 const docId = doc.id as string;
                 const filename = doc.filename as string;
                 let markdown = "";
+                // One anonymizer per doc — tabular review treats each doc
+                // independently, so placeholders should not bleed across docs.
+                let perDocAnonymizer: ChatAnonymizer | undefined;
 
                 const active = await loadActiveVersion(docId, db);
                 if (active) {
                     const buf = await downloadFile(active.storage_path);
                     if (buf) {
                         try {
-                            markdown =
-                                (doc.file_type as string) === "pdf"
-                                    ? await extractPdfMarkdown(buf)
-                                    : await extractDocxMarkdown(buf);
+                            if (anonymizeBeforeSend) {
+                                perDocAnonymizer = new ChatAnonymizer({
+                                    target: anonymizeTarget,
+                                });
+                                const prep = await perDocAnonymizer.prepareDocument(
+                                    docId,
+                                    filename,
+                                    Buffer.from(buf),
+                                    (doc.file_type as string) === "pdf"
+                                        ? "application/pdf"
+                                        : (doc.file_type as string) === "docx"
+                                          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                          : "text/plain",
+                                );
+                                markdown = prep.anonymizedText;
+                            } else {
+                                markdown =
+                                    (doc.file_type as string) === "pdf"
+                                        ? await extractPdfMarkdown(buf)
+                                        : await extractDocxMarkdown(buf);
+                            }
                         } catch (err) {
                             console.error(
                                 `[tabular/generate] extraction error doc=${docId}`,
                                 err,
                             );
+                            // Fail-closed: if anonymize was requested but we
+                            // couldn't anonymize, do NOT fall through to the
+                            // cloud LLM with raw text.
+                            if (anonymizeBeforeSend) {
+                                markdown = "";
+                            }
                         }
                     }
                 }
@@ -959,17 +1048,30 @@ tabularRouter.post("/:reviewId/generate", requireAuth, async (req, res) => {
                         columnsToProcess,
                         async (columnIndex, result) => {
                             receivedColumns.add(columnIndex);
+                            // Deanonymize before persisting and emitting so
+                            // the UI shows real values, not placeholders.
+                            const restored = perDocAnonymizer
+                                ? {
+                                      summary: perDocAnonymizer.restoreText(
+                                          result.summary,
+                                      ),
+                                      flag: result.flag,
+                                      reasoning: perDocAnonymizer.restoreText(
+                                          result.reasoning ?? "",
+                                      ),
+                                  }
+                                : result;
                             await db
                                 .from("tabular_cells")
                                 .update({
-                                    content: JSON.stringify(result),
+                                    content: JSON.stringify(restored),
                                     status: "done",
                                 })
                                 .eq("review_id", reviewId)
                                 .eq("document_id", docId)
                                 .eq("column_index", columnIndex);
                             write(
-                                `data: ${JSON.stringify({ type: "cell_update", document_id: docId, column_index: columnIndex, content: result, status: "done" })}\n\n`,
+                                `data: ${JSON.stringify({ type: "cell_update", document_id: docId, column_index: columnIndex, content: restored, status: "done" })}\n\n`,
                             );
                         },
                         api_keys,
