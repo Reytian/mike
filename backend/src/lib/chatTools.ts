@@ -1484,7 +1484,7 @@ async function readDocumentContent(
     write: (s: string) => void,
     docIndex?: DocIndex,
     db?: ReturnType<typeof createServerSupabase>,
-    opts?: { emitEvents?: boolean },
+    opts?: { emitEvents?: boolean; anonymizer?: import("./anonymizer/chatAnonymizer").ChatAnonymizer },
 ): Promise<string> {
     const emitEvents = opts?.emitEvents ?? true;
     console.log(`[read_document] called with docLabel="${docLabel}"`);
@@ -1610,6 +1610,40 @@ async function readDocumentContent(
         console.log(
             `[read_document] DONE filename="${docInfo.filename}" finalTextLength=${text.length} firstChars=${JSON.stringify(text.slice(0, 120))}`,
         );
+
+        // If auto-anonymize is enabled, route the bytes through LDA and return
+        // the anonymized text instead. The cached mapping is reused for any
+        // subsequent find_in_document on the same doc in this turn.
+        if (opts?.anonymizer && documentId) {
+            try {
+                const prep = await opts.anonymizer.prepareDocument(
+                    documentId,
+                    docInfo.filename,
+                    Buffer.from(raw),
+                    docInfo.file_type === "pdf"
+                        ? "application/pdf"
+                        : docInfo.file_type === "docx"
+                          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                          : "text/plain",
+                );
+                console.log(
+                    `[read_document] anonymized via LDA (${prep.executedOn}): ${prep.entityCount} entities, length=${prep.anonymizedText.length}`,
+                );
+                emitDocRead();
+                return prep.anonymizedText;
+            } catch (anonErr) {
+                console.error(
+                    `[read_document] anonymizer failed for filename="${docInfo.filename}":`,
+                    anonErr,
+                );
+                // Fail-closed: do NOT leak the raw text when the user opted
+                // into anonymize-before-send. Surface the failure to the LLM
+                // so it tells the user instead of silently sending PII.
+                emitDocRead();
+                return `Document could not be anonymized; refusing to return original text. Error: ${(anonErr as Error).message}`;
+            }
+        }
+
         emitDocRead();
         return text;
     } catch (err) {
@@ -1670,6 +1704,7 @@ async function findInDocumentContent(params: {
     write: (s: string) => void;
     docIndex?: DocIndex;
     db?: ReturnType<typeof createServerSupabase>;
+    anonymizer?: import("./anonymizer/chatAnonymizer").ChatAnonymizer;
 }): Promise<string> {
     const {
         docLabel,
@@ -1680,6 +1715,7 @@ async function findInDocumentContent(params: {
         write,
         docIndex,
         db,
+        anonymizer,
     } = params;
 
     if (!query || !query.trim()) {
@@ -1711,7 +1747,7 @@ async function findInDocumentContent(params: {
         write,
         docIndex,
         db,
-        { emitEvents: false },
+        { emitEvents: false, anonymizer },
     );
     if (!text || text === "Document could not be read.") {
         write(
@@ -1845,6 +1881,7 @@ export async function runToolCalls(
     docIndex?: DocIndex,
     turnEditState?: TurnEditState,
     projectId?: string | null,
+    anonymizer?: import("./anonymizer/chatAnonymizer").ChatAnonymizer,
 ): Promise<{
     toolResults: unknown[];
     docsRead: { filename: string; document_id?: string }[];
@@ -1884,6 +1921,7 @@ export async function runToolCalls(
                 write,
                 docIndex,
                 db,
+                { anonymizer },
             );
             const filename = docStore.get(docId)?.filename;
             const documentId = docIndex?.[docId]?.document_id;
@@ -1917,6 +1955,7 @@ export async function runToolCalls(
                 write,
                 docIndex,
                 db,
+                anonymizer,
             });
             const filename = docStore.get(docId)?.filename;
             if (filename) {
@@ -1962,6 +2001,7 @@ export async function runToolCalls(
                     write,
                     docIndex,
                     db,
+                    { anonymizer },
                 );
                 const filename = docStore.get(docId)?.filename ?? docId;
                 parts.push(
@@ -2729,6 +2769,15 @@ export async function runLLMStream(params: {
      * generated docs still get persisted, but as standalone documents.
      */
     projectId?: string | null;
+    /**
+     * Optional per-turn anonymizer. When set, every read_document /
+     * find_in_document tool call returns LDA-anonymized text instead of
+     * the original. The LLM only ever sees placeholders; the user sees
+     * the placeholders in the chat too (deanonymization of the assistant
+     * response is a follow-up phase). Toggled by the caller from a
+     * request body flag.
+     */
+    anonymizer?: import("./anonymizer/chatAnonymizer").ChatAnonymizer;
 }): Promise<{ fullText: string; events: AssistantEvent[] }> {
     const {
         apiMessages,
@@ -2744,6 +2793,7 @@ export async function runLLMStream(params: {
         model,
         apiKeys,
         projectId,
+        anonymizer,
     } = params;
     const activeTools = extraTools?.length
         ? [...TOOLS, ...WORKFLOW_TOOLS, ...extraTools]
@@ -2906,6 +2956,7 @@ export async function runLLMStream(params: {
                 docIndex,
                 turnEditState,
                 projectId,
+                anonymizer,
             );
             for (const r of docsRead) {
                 events.push({

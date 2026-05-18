@@ -13,6 +13,8 @@ import {
 import { completeText } from "../lib/llm";
 import { getUserApiKeys, getUserModelSettings } from "../lib/userSettings";
 import { checkProjectAccess } from "../lib/access";
+import { ChatAnonymizer } from "../lib/anonymizer/chatAnonymizer";
+import type { AnonymizerTarget } from "../lib/anonymizer/types";
 
 export const chatRouter = Router();
 
@@ -448,6 +450,19 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     const project_id = parsedProjectId.projectId;
     const model = parsedModel.model;
 
+    // Auto-anonymize-before-cloud-LLM flag. When true, every read_document /
+    // find_in_document tool call returns LDA-anonymized text. The user sees
+    // placeholders in the chat too — deanonymization of the assistant
+    // response is a follow-up phase.
+    const anonymizeBeforeSend =
+        body.anonymize_before_send === true ||
+        body.anonymize_before_send === "true";
+    const anonymizeTargetRaw = body.anonymize_target;
+    const anonymizeTarget: AnonymizerTarget =
+        anonymizeTargetRaw === "local" || anonymizeTargetRaw === "macmini"
+            ? anonymizeTargetRaw
+            : "auto";
+
     devLog("[chat/stream] incoming request", {
         userId,
         chat_id,
@@ -561,6 +576,18 @@ chatRouter.post("/", requireAuth, async (req, res) => {
     try {
         write(`data: ${JSON.stringify({ type: "chat_id", chatId })}\n\n`);
 
+        const chatAnonymizer = anonymizeBeforeSend
+            ? new ChatAnonymizer({ target: anonymizeTarget })
+            : undefined;
+        if (chatAnonymizer) {
+            write(
+                `data: ${JSON.stringify({
+                    type: "anonymize_mode",
+                    target: anonymizeTarget,
+                })}\n\n`,
+            );
+        }
+
         const { fullText, events } = await runLLMStream({
             apiMessages,
             docStore,
@@ -572,6 +599,7 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             model,
             apiKeys,
             projectId: resolvedProjectId,
+            anonymizer: chatAnonymizer,
         });
 
         devLog("[chat/stream] LLM stream finished", {

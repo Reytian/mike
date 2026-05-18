@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { MikeDocument, MikeProject } from "./types";
 import { VersionChip } from "./VersionChip";
+import { AnonymizeButton } from "@/app/components/anonymize/AnonymizeButton";
 
 function formatDate(iso: string | null) {
     if (!iso) return null;
@@ -81,6 +82,14 @@ export function FileDirectory({
         ...standaloneDocs,
         ...directoryProjects.flatMap((p) => p.documents ?? []),
     ];
+
+    // Anonymize action applies to exactly one selected doc. The button is
+    // wired up to the existing Delete pattern in the header row so we don't
+    // have to break the row's single-button click semantics.
+    const singleSelected: MikeDocument | null =
+        selectedCount === 1
+            ? allDocs.find((d) => selectedIds.has(d.id)) ?? null
+            : null;
 
     const allStandaloneSelected =
         standaloneDocs.length > 0 &&
@@ -168,6 +177,16 @@ export function FileDirectory({
                             {heading}
                         </p>
                         <div className="flex items-center gap-3">
+                            {singleSelected && (
+                                <AnonymizeButton
+                                    documentId={singleSelected.id}
+                                    filename={singleSelected.filename}
+                                    variant="ghost"
+                                    title={`Anonymize ${singleSelected.filename}`}
+                                    label="Anonymize"
+                                    className="inline-flex items-center gap-1 text-xs text-emerald-600 hover:text-emerald-700 transition-colors"
+                                />
+                            )}
                             {onDelete && selectedCount > 0 && (
                                 <button
                                     type="button"

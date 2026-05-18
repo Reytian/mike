@@ -500,6 +500,13 @@ export async function streamChat(payload: {
     chat_id?: string;
     project_id?: string;
     model?: string;
+    /**
+     * When true, every document read by the LLM is routed through LDA
+     * first; the LLM only ever sees placeholders. Pair with
+     * `anonymize_target` to force a specific sidecar.
+     */
+    anonymize_before_send?: boolean;
+    anonymize_target?: "auto" | "local" | "macmini";
     signal?: AbortSignal;
 }): Promise<Response> {
     const { signal, ...body } = payload;

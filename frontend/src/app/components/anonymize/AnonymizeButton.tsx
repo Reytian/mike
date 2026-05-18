@@ -10,10 +10,12 @@ interface Props {
     filename: string;
     /** Optional: notified when an anonymized version is produced. */
     onAnonymized?: (result: AnonymizeResult) => void;
-    /** Visual variant. "ghost" is icon-only (for dense rows). */
+    /** Visual variant. "ghost" is unstyled-icon. "primary" is the green CTA. */
     variant?: "ghost" | "primary";
     title?: string;
     className?: string;
+    /** Inline label next to the icon. Defaults to "Anonymize" for primary, none for ghost. */
+    label?: string;
 }
 
 export function AnonymizeButton({
@@ -23,8 +25,10 @@ export function AnonymizeButton({
     variant = "ghost",
     title = "Anonymize document",
     className,
+    label,
 }: Props) {
     const [open, setOpen] = useState(false);
+    const showLabel = label ?? (variant === "primary" ? "Anonymize" : undefined);
 
     return (
         <>
@@ -44,8 +48,8 @@ export function AnonymizeButton({
                         : "rounded-md p-1.5 text-gray-400 hover:bg-gray-100 hover:text-emerald-700")
                 }
             >
-                <ShieldCheck className="h-4 w-4" />
-                {variant === "primary" && <span>Anonymize</span>}
+                <ShieldCheck className="h-3.5 w-3.5" />
+                {showLabel && <span>{showLabel}</span>}
             </button>
             <AnonymizeModal
                 open={open}
