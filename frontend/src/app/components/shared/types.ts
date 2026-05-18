@@ -152,6 +152,8 @@ export interface MikeMessage {
   events?: AssistantEvent[];
   /** Set when streaming failed; rendered as a red error block. */
   error?: string;
+  /** Backend emitted 'anonymize_mode' for this turn — render a badge. */
+  anonymizeMode?: { target: "auto" | "local" | "macmini" };
 }
 
 export interface CitationQuote {

@@ -420,6 +420,70 @@ export function useAssistantChat({
                             continue;
                         }
 
+                        // Backend sends this when an auto-anonymize chat
+                        // turn finishes: the streamed placeholders should
+                        // be replaced with the deanonymized text now that
+                        // the response is complete. Just patches the last
+                        // streaming content event in place.
+                        if (data.type === "content_replace") {
+                            const text = data.text as string;
+                            stopDrip();
+                            const events = eventsRef.current;
+                            // Find the last content event (streaming or not)
+                            // and replace its text.
+                            for (let i = events.length - 1; i >= 0; i--) {
+                                const ev = events[i];
+                                if (ev.type === "content") {
+                                    eventsRef.current = [
+                                        ...events.slice(0, i),
+                                        { type: "content" as const, text },
+                                        ...events.slice(i + 1),
+                                    ];
+                                    break;
+                                }
+                            }
+                            dripTargetRef.current = text;
+                            dripDisplayLenRef.current = text.length;
+                            const snapshot = [...eventsRef.current];
+                            setMessages((prev) => {
+                                const updated = [...prev];
+                                const last = updated[updated.length - 1];
+                                if (last?.role === "assistant") {
+                                    updated[updated.length - 1] = {
+                                        ...last,
+                                        events: snapshot,
+                                    };
+                                }
+                                return updated;
+                            });
+                            continue;
+                        }
+
+                        // Surface that auto-anonymize is active for this turn
+                        // so the UI can show a badge near the message.
+                        if (data.type === "anonymize_mode") {
+                            // Store as a lightweight class on the assistant
+                            // bubble via the messages array. The component
+                            // can render a small indicator if it wants.
+                            setMessages((prev) => {
+                                const updated = [...prev];
+                                const last = updated[updated.length - 1];
+                                if (last?.role === "assistant") {
+                                    updated[updated.length - 1] = {
+                                        ...last,
+                                        anonymizeMode: {
+                                            target: data.target as
+                                                | "auto"
+                                                | "local"
+                                                | "macmini",
+                                        },
+                                    };
+                                }
+                                return updated;
+                            });
+                            continue;
+                        }
+
                         if (data.type === "content_delta") {
                             const text = data.text as string;
 

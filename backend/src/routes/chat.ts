@@ -607,11 +607,35 @@ chatRouter.post("/", requireAuth, async (req, res) => {
             eventCount: events?.length ?? 0,
         });
 
-        const annotations = extractAnnotations(fullText, docIndex, events);
+        // Deanonymize text-bearing events before persisting + tell the UI to
+        // replace the in-flight streamed text. Only acts when chatAnonymizer
+        // was active; otherwise this is a no-op.
+        let finalEvents = events;
+        let finalText = fullText;
+        if (chatAnonymizer) {
+            finalEvents = events.map((ev) =>
+                ev.type === "content" || ev.type === "reasoning"
+                    ? { ...ev, text: chatAnonymizer.restoreText(ev.text) }
+                    : ev,
+            );
+            finalText = chatAnonymizer.restoreText(fullText);
+            const replaced = finalEvents
+                .filter((ev) => ev.type === "content")
+                .map((ev) => (ev as { text: string }).text)
+                .join("");
+            write(
+                `data: ${JSON.stringify({
+                    type: "content_replace",
+                    text: replaced,
+                })}\n\n`,
+            );
+        }
+
+        const annotations = extractAnnotations(finalText, docIndex, finalEvents);
         await db.from("chat_messages").insert({
             chat_id: chatId,
             role: "assistant",
-            content: events.length ? events : null,
+            content: finalEvents.length ? finalEvents : null,
             annotations: annotations.length ? annotations : null,
         });
 
