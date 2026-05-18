@@ -49,6 +49,9 @@ export function FillTemplateModal({
     const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
     const [running, setRunning] = useState(false);
     const [result, setResult] = useState<FillTemplateResponse | null>(null);
+    const [editedValues, setEditedValues] = useState<Record<string, string>>(
+        {},
+    );
     const [error, setError] = useState<string | null>(null);
     const [loadingTemplates, setLoadingTemplates] = useState(false);
     const [uploadingTemplate, setUploadingTemplate] = useState(false);
@@ -81,8 +84,40 @@ export function FillTemplateModal({
             setProfileIds(new Set());
             setTemplateId("");
             setRunning(false);
+            setEditedValues({});
         }
     }, [open]);
+
+    /** Effective slot map = LLM result merged with the user's inline edits. */
+    const effectiveSlotValues = useMemo<Record<string, string | null>>(() => {
+        if (!result) return {};
+        const merged: Record<string, string | null> = { ...result.slot_values };
+        for (const [slot, v] of Object.entries(editedValues)) {
+            if (v && v.trim()) merged[slot] = v;
+        }
+        return merged;
+    }, [result, editedValues]);
+
+    /** Re-render filled_text with the user's edits applied. Starts from the
+     *  sidecar's filled_text (which already has resolved slots substituted)
+     *  and overlays each user edit by replacing the bare {SLOT} placeholder
+     *  where the unresolved slot still lives. */
+    const effectiveFilledText = useMemo(() => {
+        if (!result) return "";
+        let text = result.filled_text;
+        for (const [slot, value] of Object.entries(editedValues)) {
+            if (value && value.trim()) {
+                text = text.split(`{${slot}}`).join(value);
+            }
+        }
+        return text;
+    }, [result, editedValues]);
+
+    const remainingUnresolved = useMemo(() => {
+        return Object.entries(effectiveSlotValues)
+            .filter(([_, v]) => !v)
+            .map(([k]) => k);
+    }, [effectiveSlotValues]);
 
     const handleTemplateUpload = async (
         e: React.ChangeEvent<HTMLInputElement>,
@@ -132,7 +167,9 @@ export function FillTemplateModal({
 
     const handleDownload = () => {
         if (!result) return;
-        const blob = new Blob([result.filled_text], { type: "text/markdown" });
+        // Use the user-edited text, not the raw sidecar output, so the
+        // download reflects in-place fixes to unresolved slots.
+        const blob = new Blob([effectiveFilledText], { type: "text/markdown" });
         const url = URL.createObjectURL(blob);
         const a = window.document.createElement("a");
         a.href = url;
@@ -343,59 +380,108 @@ export function FillTemplateModal({
                                         Filled —{" "}
                                         {
                                             Object.values(
-                                                result.slot_values,
+                                                effectiveSlotValues,
                                             ).filter((v) => v).length
                                         }{" "}
                                         of{" "}
                                         {
-                                            Object.keys(result.slot_values)
+                                            Object.keys(effectiveSlotValues)
                                                 .length
                                         }{" "}
                                         slots, ran on {result.executed_on}{" "}
                                         ({result.model}),{" "}
                                         {Math.round(result.latency_ms / 1000)} s
                                     </div>
-                                    {result.unresolved_slots.length > 0 && (
+                                    {remainingUnresolved.length > 0 ? (
                                         <div className="mt-0.5 text-emerald-700/80">
-                                            Unresolved:{" "}
-                                            {result.unresolved_slots.join(", ")}
+                                            Still unresolved:{" "}
+                                            {remainingUnresolved.join(", ")}
+                                            <span className="ml-1 text-emerald-700/60">
+                                                — fill below to fix
+                                            </span>
                                         </div>
+                                    ) : (
+                                        Object.keys(editedValues).length > 0 && (
+                                            <div className="mt-0.5 text-emerald-700/80">
+                                                All slots filled (including
+                                                your manual edits).
+                                            </div>
+                                        )
                                     )}
                                 </div>
                             </div>
                             <div className="overflow-hidden rounded-md border border-gray-200">
                                 <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] font-medium text-gray-500">
-                                    Filled preview
+                                    Filled preview (live)
                                 </div>
                                 <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap px-3 py-2 text-[11px] leading-relaxed text-gray-700">
-                                    {result.filled_text}
+                                    {effectiveFilledText}
                                 </pre>
                             </div>
                             <div className="overflow-hidden rounded-md border border-gray-200">
                                 <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] font-medium text-gray-500">
-                                    Slot map
+                                    Slot map{" "}
+                                    <span className="text-gray-400">
+                                        (click an unresolved slot to fill it
+                                        manually)
+                                    </span>
                                 </div>
-                                <div className="max-h-44 overflow-y-auto divide-y divide-gray-50">
-                                    {Object.entries(result.slot_values).map(
-                                        ([slot, value]) => (
-                                            <div
-                                                key={slot}
-                                                className="flex items-start gap-3 px-3 py-1.5 text-[11px]"
-                                            >
-                                                <span className="w-40 shrink-0 truncate font-mono text-gray-500">
-                                                    {`{${slot}}`}
-                                                </span>
-                                                <span
-                                                    className={`flex-1 ${
-                                                        value
-                                                            ? "text-gray-800"
-                                                            : "italic text-gray-400"
-                                                    }`}
+                                <div className="max-h-56 overflow-y-auto divide-y divide-gray-50">
+                                    {Object.entries(effectiveSlotValues).map(
+                                        ([slot, value]) => {
+                                            const wasUnresolved =
+                                                result.slot_values[slot] == null;
+                                            const userEdited =
+                                                editedValues[slot] != null;
+                                            return (
+                                                <div
+                                                    key={slot}
+                                                    className="flex items-center gap-3 px-3 py-1.5 text-[11px]"
                                                 >
-                                                    {value ?? "(not found)"}
-                                                </span>
-                                            </div>
-                                        ),
+                                                    <span className="w-40 shrink-0 truncate font-mono text-gray-500">
+                                                        {`{${slot}}`}
+                                                    </span>
+                                                    {wasUnresolved ? (
+                                                        <input
+                                                            value={
+                                                                editedValues[
+                                                                    slot
+                                                                ] ?? ""
+                                                            }
+                                                            onChange={(e) =>
+                                                                setEditedValues(
+                                                                    (prev) => ({
+                                                                        ...prev,
+                                                                        [slot]:
+                                                                            e
+                                                                                .target
+                                                                                .value,
+                                                                    }),
+                                                                )
+                                                            }
+                                                            placeholder="(not found — type a value)"
+                                                            className={`flex-1 rounded-md border px-2 py-1 text-[11px] focus:outline-none ${
+                                                                editedValues[
+                                                                    slot
+                                                                ]
+                                                                    ? "border-emerald-300 bg-emerald-50/40 text-gray-800 focus:border-emerald-500"
+                                                                    : "border-gray-200 italic text-gray-400 focus:border-emerald-400"
+                                                            }`}
+                                                        />
+                                                    ) : (
+                                                        <span
+                                                            className={`flex-1 ${
+                                                                userEdited
+                                                                    ? "text-emerald-800"
+                                                                    : "text-gray-800"
+                                                            }`}
+                                                        >
+                                                            {value}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            );
+                                        },
                                     )}
                                 </div>
                             </div>
