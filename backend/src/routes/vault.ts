@@ -455,12 +455,28 @@ vaultRouter.post("/vault/fill-template", requireAuth, async (req, res) => {
         slotsSchema = body.slots_schema as Record<string, FillSlotSchemaEntry>;
     }
 
-    // Load + access-check the template doc.
+    // Load + access-check the template doc. Pull template_schema too — if
+    // the template was generated via generate_docx (which auto-detects
+    // slots) or enriched via define_template_schema, those hints flow
+    // into the slot resolver automatically. Explicit body.slots_schema
+    // wins when both are present.
     const { data: templateDoc } = await db
         .from("documents")
-        .select("id, filename, file_type, user_id, project_id, confidentiality")
+        .select(
+            "id, filename, file_type, user_id, project_id, confidentiality, template_schema",
+        )
         .eq("id", templateId)
         .single();
+    if (
+        !slotsSchema &&
+        templateDoc?.template_schema &&
+        typeof templateDoc.template_schema === "object"
+    ) {
+        slotsSchema = templateDoc.template_schema as Record<
+            string,
+            FillSlotSchemaEntry
+        >;
+    }
     if (!templateDoc) {
         return void res.status(404).json({ detail: "Template not found" });
     }

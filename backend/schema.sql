@@ -116,6 +116,10 @@ create table if not exists public.documents (
   -- 'pending' | 'skipped' (text layer present) | 'done' | 'failed'
   ocr_status text,
   ocr_text_layer_present boolean,
+  -- Template slot schema for confidentiality='template' docs (and any
+  -- generate_docx output that contains {SLOT_NAME} placeholders). Shape:
+  -- { "SLOT_NAME": {"type": "...", "role": "...", "hint": "..."}, ... }
+  template_schema jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint documents_confidentiality_check

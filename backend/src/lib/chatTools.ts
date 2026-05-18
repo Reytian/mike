@@ -492,6 +492,50 @@ export const TOOLS = [
             },
         },
     },
+    {
+        type: "function",
+        function: {
+            name: "define_template_schema",
+            description:
+                "Attach a slot schema to a template document the user is drafting (typically right after you called generate_docx with {SLOT_NAME} placeholders). The schema describes each placeholder's expected type, role, and a short hint so Mike's local vault fill workflow can match values from the user's private registration documents accurately without you ever seeing those private values. Call this proactively whenever you draft a fillable template — it makes 'Fill from vault' a one-click action for the user.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: {
+                        type: "string",
+                        description:
+                            "The template document ID returned by generate_docx (e.g. 'doc-2').",
+                    },
+                    schema: {
+                        type: "object",
+                        description:
+                            "Object keyed by slot name (without braces), each value an object with optional 'type', 'role', 'hint'. Use slots that exist in the template you just generated.",
+                        additionalProperties: {
+                            type: "object",
+                            properties: {
+                                type: {
+                                    type: "string",
+                                    description:
+                                        "Expected value type: person, company, address, regnum, amount, date, jurisdiction, phone, email, any",
+                                },
+                                role: {
+                                    type: "string",
+                                    description:
+                                        "Functional role of the slot, e.g. 'seller', 'buyer', 'signatory', 'effective_date'.",
+                                },
+                                hint: {
+                                    type: "string",
+                                    description:
+                                        "Free-text disambiguator, e.g. 'the first party named in the recitals'.",
+                                },
+                            },
+                        },
+                    },
+                },
+                required: ["doc_id", "schema"],
+            },
+        },
+    },
 ];
 
 type ParsedCitation = {
@@ -1285,6 +1329,51 @@ export async function generateDocx(
     } catch (e) {
         return { error: String(e) };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Template slot extraction (for generate_docx → template_schema)
+// ---------------------------------------------------------------------------
+
+const TEMPLATE_SLOT_RE = /\{([A-Z][A-Z0-9_]*)\}/g;
+
+/** Recursively walks a generate_docx-style sections array (heading + content
+ *  + table cells) and returns the unique set of `{SLOT_NAME}` placeholders
+ *  found, preserving first-seen order.  Used to seed documents.template_schema
+ *  so the vault fill workflow can offer one-click fill from a profile. */
+function extractTemplateSlots(
+    sections: unknown,
+    title?: string,
+): string[] {
+    const seen = new Set<string>();
+    const order: string[] = [];
+    const pushFromString = (s: string) => {
+        for (const m of s.matchAll(TEMPLATE_SLOT_RE)) {
+            const name = m[1];
+            if (!seen.has(name)) {
+                seen.add(name);
+                order.push(name);
+            }
+        }
+    };
+    const walk = (node: unknown) => {
+        if (node == null) return;
+        if (typeof node === "string") {
+            pushFromString(node);
+            return;
+        }
+        if (Array.isArray(node)) {
+            for (const n of node) walk(n);
+            return;
+        }
+        if (typeof node === "object") {
+            for (const v of Object.values(node as Record<string, unknown>))
+                walk(v);
+        }
+    };
+    if (title) pushFromString(title);
+    walk(sections);
+    return order;
 }
 
 // ---------------------------------------------------------------------------
@@ -2656,6 +2745,35 @@ export async function runToolCalls(
                     });
                 }
 
+                // Auto-detect {SLOT_NAME} placeholders in the generated
+                // sections and persist a minimal template schema. The cloud
+                // LLM can enrich this later via define_template_schema if
+                // the user asked it to draft a fillable template.
+                if (documentId) {
+                    try {
+                        const slots = extractTemplateSlots(
+                            args.sections as unknown[],
+                            title,
+                        );
+                        if (slots.length > 0) {
+                            const minimalSchema: Record<
+                                string,
+                                { type: string }
+                            > = {};
+                            for (const s of slots) minimalSchema[s] = { type: "any" };
+                            await db
+                                .from("documents")
+                                .update({ template_schema: minimalSchema })
+                                .eq("id", documentId);
+                        }
+                    } catch (e) {
+                        console.warn(
+                            "[generate_docx] template schema auto-detect failed:",
+                            e,
+                        );
+                    }
+                }
+
                 write(
                     `data: ${JSON.stringify({
                         type: "doc_created",
@@ -2725,6 +2843,77 @@ export async function runToolCalls(
                         filename: docInfo.filename,
                         entity_count: result.entityCount,
                         type_counts: result.typeCounts,
+                    }),
+                });
+            } catch (err) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: (err as Error).message,
+                    }),
+                });
+            }
+        } else if (tc.function.name === "define_template_schema") {
+            const rawDocId = args.doc_id as string;
+            const docId =
+                resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+            const documentId = docIndex?.[docId]?.document_id;
+            const schemaArg = args.schema;
+            try {
+                if (!documentId) {
+                    throw new Error(`Document not found: ${rawDocId}`);
+                }
+                if (!schemaArg || typeof schemaArg !== "object") {
+                    throw new Error("schema must be an object");
+                }
+                // Whitelist-shape the entries: { type?, role?, hint? } only.
+                const cleaned: Record<
+                    string,
+                    { type?: string; role?: string; hint?: string }
+                > = {};
+                for (const [slot, raw] of Object.entries(
+                    schemaArg as Record<string, unknown>,
+                )) {
+                    if (!/^[A-Z][A-Z0-9_]*$/.test(slot)) continue;
+                    const entry =
+                        raw && typeof raw === "object"
+                            ? (raw as Record<string, unknown>)
+                            : {};
+                    cleaned[slot] = {
+                        type:
+                            typeof entry.type === "string" ? entry.type : undefined,
+                        role:
+                            typeof entry.role === "string" ? entry.role : undefined,
+                        hint:
+                            typeof entry.hint === "string" ? entry.hint : undefined,
+                    };
+                }
+                // Merge with anything already on the doc (e.g. minimal schema
+                // from generate_docx auto-detect) — explicit entries win.
+                const { data: existing } = await db
+                    .from("documents")
+                    .select("template_schema")
+                    .eq("id", documentId)
+                    .single();
+                const merged = {
+                    ...((existing?.template_schema as Record<string, unknown>) ??
+                        {}),
+                    ...cleaned,
+                };
+                await db
+                    .from("documents")
+                    .update({ template_schema: merged })
+                    .eq("id", documentId);
+
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: true,
+                        doc_id: docId,
+                        slots_saved: Object.keys(cleaned).length,
                     }),
                 });
             } catch (err) {
