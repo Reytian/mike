@@ -448,6 +448,50 @@ export const TOOLS = [
             },
         },
     },
+    {
+        type: "function",
+        function: {
+            name: "scan_document_pii",
+            description:
+                "Quickly check a document for personally identifying information using regex patterns (no LLM call). Returns counts by entity type (person/company/email/phone/regnum/address/amount/date/bank). Use this to decide whether the document needs anonymization before sharing.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: {
+                        type: "string",
+                        description:
+                            "The document ID to scan (e.g. 'doc-0').",
+                    },
+                },
+                required: ["doc_id"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "anonymize_document",
+            description:
+                "Produce a PII-redacted version of a document using the local LDA pipeline. Names, addresses, phone numbers, emails, registration numbers, bank info, and amounts are replaced with {TYPE_N} placeholders. Returns a new doc_id that can be passed to read_document / find_in_document. The mapping back to real names is kept on the user's side and never sent to a cloud LLM. Useful when the user wants to redact a document or work with anonymized data.",
+            parameters: {
+                type: "object",
+                properties: {
+                    doc_id: {
+                        type: "string",
+                        description:
+                            "Source document ID to anonymize (e.g. 'doc-0').",
+                    },
+                    exclude_types: {
+                        type: "array",
+                        items: { type: "string" },
+                        description:
+                            "Entity types to keep visible (not replaced). Choose from: date, amount, address, regnum, phone, email. Omit to anonymize everything LDA finds.",
+                    },
+                },
+                required: ["doc_id"],
+            },
+        },
+    },
 ];
 
 type ParsedCitation = {
@@ -2652,6 +2696,177 @@ export async function runToolCalls(
                 tool_call_id: tc.id,
                 content: JSON.stringify(toolResultPayload),
             });
+        } else if (tc.function.name === "scan_document_pii") {
+            const rawDocId = args.doc_id as string;
+            const docId =
+                resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+            const docInfo = docStore.get(docId);
+            try {
+                if (!docInfo) throw new Error(`Document not found: ${rawDocId}`);
+                // Cheap path: reuse readDocumentContent (no anonymizer) to
+                // extract the text. Suppress its doc_read SSE events since
+                // a scan isn't a read.
+                const text = await readDocumentContent(
+                    docId,
+                    docStore,
+                    write,
+                    docIndex,
+                    db,
+                    { emitEvents: false },
+                );
+                const { routedScan } = await import("./anonymizer/routing");
+                const { result } = await routedScan(text);
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: true,
+                        doc_id: docId,
+                        filename: docInfo.filename,
+                        entity_count: result.entityCount,
+                        type_counts: result.typeCounts,
+                    }),
+                });
+            } catch (err) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: (err as Error).message,
+                    }),
+                });
+            }
+        } else if (tc.function.name === "anonymize_document") {
+            const rawDocId = args.doc_id as string;
+            const docId =
+                resolveDocLabel(rawDocId, docStore, docIndex) ?? rawDocId;
+            const docInfo = docStore.get(docId);
+            const documentId = docIndex?.[docId]?.document_id;
+            const excludeTypes = Array.isArray(args.exclude_types)
+                ? (args.exclude_types as unknown[]).filter(
+                      (t): t is string => typeof t === "string",
+                  )
+                : undefined;
+            try {
+                if (!docInfo || !documentId) {
+                    throw new Error(`Document not found: ${rawDocId}`);
+                }
+                const active = await loadActiveVersion(documentId, db);
+                const sourceVersionId = active?.id ?? null;
+                const raw = await downloadFile(
+                    active?.storage_path ?? docInfo.storage_path,
+                );
+                if (!raw) throw new Error("Could not fetch document bytes");
+
+                const { routedAnonymize } = await import(
+                    "./anonymizer/routing"
+                );
+                const result = await routedAnonymize(
+                    [
+                        {
+                            filename: docInfo.filename,
+                            bytes: Buffer.from(raw),
+                            contentType:
+                                docInfo.file_type === "pdf"
+                                    ? "application/pdf"
+                                    : docInfo.file_type === "docx"
+                                      ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                      : "text/plain",
+                        },
+                    ],
+                    { format: "md", excludeTypes },
+                );
+                const out = result.anonymizedFiles[0];
+                if (!out) throw new Error("Sidecar returned no anonymized file");
+
+                // Mirror /single-documents/:id/anonymize: store the bytes
+                // + mapping.json, persist a new document_versions row.
+                const versionSlug = (await import("node:crypto"))
+                    .randomUUID()
+                    .replace(/-/g, "");
+                const anonKey = `documents/${userId}/${documentId}/anonymized/${versionSlug}.md`;
+                const mapKey = `documents/${userId}/${documentId}/mappings/${versionSlug}.json`;
+                await uploadFile(
+                    anonKey,
+                    out.bytes.buffer.slice(
+                        out.bytes.byteOffset,
+                        out.bytes.byteOffset + out.bytes.byteLength,
+                    ) as ArrayBuffer,
+                    out.contentType,
+                );
+                const mappingBuf = Buffer.from(JSON.stringify(result.mapping));
+                await uploadFile(
+                    mapKey,
+                    mappingBuf.buffer.slice(
+                        mappingBuf.byteOffset,
+                        mappingBuf.byteOffset + mappingBuf.byteLength,
+                    ) as ArrayBuffer,
+                    "application/json",
+                );
+                const { data: versionRow } = await db
+                    .from("document_versions")
+                    .insert({
+                        document_id: documentId,
+                        storage_path: anonKey,
+                        source: "anonymized",
+                        source_version_id: sourceVersionId,
+                        mapping_storage_key: mapKey,
+                        entity_count: result.entityCount,
+                        model_used: `${result.executedOn}`,
+                        display_name: `${docInfo.filename} (anonymized)`,
+                    })
+                    .select("id")
+                    .single();
+                const newVersionId = (versionRow?.id as string) ?? null;
+
+                // Register the new anonymized version in this chat's docStore
+                // so subsequent read_document / find_in_document calls can
+                // address it by label.
+                const baseLabel = docId.replace(/-anon\d*$/, "");
+                let suffix = 1;
+                let newLabel = `${baseLabel}-anon`;
+                while (docStore.has(newLabel)) {
+                    suffix += 1;
+                    newLabel = `${baseLabel}-anon${suffix}`;
+                }
+                docStore.set(newLabel, {
+                    storage_path: anonKey,
+                    file_type: "md",
+                    filename: `${docInfo.filename} (anonymized)`,
+                });
+                if (docIndex) {
+                    docIndex[newLabel] = {
+                        document_id: documentId,
+                        filename: `${docInfo.filename} (anonymized)`,
+                        version_id: newVersionId,
+                        version_number: null,
+                    };
+                }
+
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: true,
+                        anonymized_doc_id: newLabel,
+                        source_doc_id: docId,
+                        entity_count: result.entityCount,
+                        executed_on: result.executedOn,
+                        latency_ms: result.latencyMs,
+                        next_required_action: `Use read_document with doc_id "${newLabel}" to read the anonymized version.`,
+                    }),
+                });
+            } catch (err) {
+                toolResults.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: JSON.stringify({
+                        ok: false,
+                        error: (err as Error).message,
+                    }),
+                });
+            }
         }
     }
 
