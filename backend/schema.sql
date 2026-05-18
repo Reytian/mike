@@ -125,6 +125,15 @@ create table if not exists public.document_versions (
   source text not null default 'upload',
   version_number integer,
   display_name text,
+  -- Links an anonymized / deanonymized version back to the version it was
+  -- derived from. NULL for original uploads and assistant edits.
+  source_version_id uuid references public.document_versions(id) on delete set null,
+  -- R2 key for the LDA mapping.json (only set for source='anonymized').
+  -- This is the bridge from placeholders back to real names — must never
+  -- be sent to a cloud LLM.
+  mapping_storage_key text,
+  entity_count integer,
+  model_used text,
   created_at timestamptz not null default now(),
   constraint document_versions_source_check
     check (source = any (array[
@@ -133,7 +142,9 @@ create table if not exists public.document_versions (
       'assistant_edit'::text,
       'user_accept'::text,
       'user_reject'::text,
-      'generated'::text
+      'generated'::text,
+      'anonymized'::text,
+      'deanonymized'::text
     ]))
 );
 
@@ -142,6 +153,9 @@ create index if not exists document_versions_document_id_idx
 
 create index if not exists document_versions_doc_vnum_idx
   on public.document_versions(document_id, version_number);
+
+create index if not exists document_versions_source_version_idx
+  on public.document_versions(source_version_id);
 
 alter table public.documents
   add column if not exists current_version_id uuid

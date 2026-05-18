@@ -11,6 +11,7 @@ import { tabularRouter } from "./routes/tabular";
 import { workflowsRouter } from "./routes/workflows";
 import { userRouter } from "./routes/user";
 import { downloadsRouter } from "./routes/downloads";
+import { anonymizeRouter } from "./routes/anonymize";
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -118,6 +119,11 @@ app.use("/workflows", workflowsRouter);
 app.use("/user", userRouter);
 app.use("/users", userRouter);
 app.use("/download", downloadsRouter);
+
+// Anonymizer routes are mounted at the app root because they live under both
+// /anonymizer/* (health, scan) and /single-documents/:id/anonymize. Keeping
+// one router avoids duplicate auth wiring across two mount points.
+app.use("/", anonymizeRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
