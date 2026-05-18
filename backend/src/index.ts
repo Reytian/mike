@@ -12,6 +12,7 @@ import { workflowsRouter } from "./routes/workflows";
 import { userRouter } from "./routes/user";
 import { downloadsRouter } from "./routes/downloads";
 import { anonymizeRouter } from "./routes/anonymize";
+import { vaultRouter } from "./routes/vault";
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -109,6 +110,10 @@ app.post("/chat/:chatId/generate-title", chatCreateLimiter);
 app.post("/single-documents", uploadLimiter);
 app.post("/single-documents/:documentId/versions", uploadLimiter);
 app.post("/projects/:projectId/documents", uploadLimiter);
+// Vault upload + fill calls hit LDA which can take double-digit seconds;
+// rate-limit them like other expensive endpoints.
+app.post("/vault/documents", uploadLimiter);
+app.post("/vault/fill-template", chatLimiter);
 
 app.use("/chat", chatRouter);
 app.use("/projects", projectsRouter);
@@ -124,6 +129,9 @@ app.use("/download", downloadsRouter);
 // /anonymizer/* (health, scan) and /single-documents/:id/anonymize. Keeping
 // one router avoids duplicate auth wiring across two mount points.
 app.use("/", anonymizeRouter);
+
+// Vault routes (/vault/*) — local-only documents + fill_template endpoint.
+app.use("/", vaultRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

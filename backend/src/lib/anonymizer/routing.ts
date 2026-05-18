@@ -15,6 +15,8 @@ import {
     anonymize as clientAnonymize,
     checkHealth as clientCheckHealth,
     deanonymize as clientDeanonymize,
+    fillTemplate as clientFillTemplate,
+    ocrPdf as clientOcrPdf,
     scan as clientScan,
 } from "./client";
 import { getAnonymizerConfig, type AnonymizerEndpoint } from "./config";
@@ -24,7 +26,10 @@ import type {
     AnonymizeResult,
     DeanonymizeResult,
     ExecutedOn,
+    FillSlotSchemaEntry,
+    FillTemplateResult,
     HealthReport,
+    OcrResult,
     RoutingHealth,
     ScanResult,
 } from "./types";
@@ -205,6 +210,39 @@ export async function routedDeanonymize(
         clientDeanonymize(endpoint, editedFile, mapping, {
             referenceDocx: options.referenceDocx,
             targetFormat: options.targetFormat,
+        }),
+    );
+}
+
+export async function routedOcr(
+    file: { filename: string; bytes: Buffer },
+    options: {
+        target?: AnonymizerTarget;
+        languages?: string;
+        force?: boolean;
+    } = {},
+): Promise<OcrResult> {
+    const target = options.target ?? "auto";
+    return runWithFallback(target, (endpoint) =>
+        clientOcrPdf(endpoint, file, {
+            languages: options.languages,
+            force: options.force,
+        }),
+    );
+}
+
+export async function routedFillTemplate(
+    template: { filename: string; bytes: Buffer; contentType?: string },
+    sources: { filename: string; bytes: Buffer; contentType?: string }[],
+    options: {
+        target?: AnonymizerTarget;
+        slotsSchema?: Record<string, FillSlotSchemaEntry>;
+    } = {},
+): Promise<FillTemplateResult> {
+    const target = options.target ?? "auto";
+    return runWithFallback(target, (endpoint) =>
+        clientFillTemplate(endpoint, template, sources, {
+            slotsSchema: options.slotsSchema,
         }),
     );
 }

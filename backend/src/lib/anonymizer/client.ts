@@ -12,7 +12,10 @@ import type {
     AnonymizedFile,
     DeanonymizeResult,
     ExecutedOn,
+    FillSlotSchemaEntry,
+    FillTemplateResult,
     HealthReport,
+    OcrResult,
     ScanResult,
 } from "./types";
 import { getAnonymizerConfig, type AnonymizerEndpoint } from "./config";
@@ -271,6 +274,129 @@ export async function deanonymize(
         contentType,
         filename,
         stats,
+        executedOn: endpointToExecutedOn(endpoint.name),
+    };
+}
+
+/**
+ * POST /ocr — add a text layer to a scanned PDF via Tesseract.
+ * Returns the bytes unchanged (status='skipped') if the PDF already has
+ * a text layer. Uses 'eng+chi_sim' by default.
+ */
+export async function ocrPdf(
+    endpoint: AnonymizerEndpoint,
+    file: { filename: string; bytes: Buffer },
+    options: { languages?: string; force?: boolean } = {},
+): Promise<OcrResult> {
+    const form = new FormData();
+    form.append(
+        "file",
+        new Blob([new Uint8Array(file.bytes)], { type: "application/pdf" }),
+        file.filename,
+    );
+    form.append("languages", options.languages ?? "eng+chi_sim");
+    if (options.force) form.append("force", "true");
+
+    const r = await fetch(`${endpoint.url}/ocr`, {
+        method: "POST",
+        headers: { ...authHeader() },
+        body: form,
+    });
+    if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        throw new AnonymizerHttpError(
+            `ocr failed on ${endpoint.name}: HTTP ${r.status}: ${detail.slice(0, 200)}`,
+            r.status,
+            endpoint,
+        );
+    }
+    const status = (r.headers.get("x-lda-ocr-status") ?? "done") as
+        | "done"
+        | "skipped";
+    const reason = r.headers.get("x-lda-ocr-reason") ?? undefined;
+    const languagesUsed = r.headers.get("x-lda-ocr-languages") ?? undefined;
+    const latencyHeader = r.headers.get("x-lda-ocr-latency-ms");
+    const latencyMs = latencyHeader ? Number(latencyHeader) : undefined;
+    const contentType = r.headers.get("content-type") ?? "application/pdf";
+    const bytes = Buffer.from(await r.arrayBuffer());
+    return {
+        bytes,
+        contentType,
+        status,
+        reason,
+        languagesUsed,
+        latencyMs,
+        executedOn: endpointToExecutedOn(endpoint.name),
+    };
+}
+
+/**
+ * POST /fill_template — local-only slot resolver.
+ *
+ * Reads a template containing `{SLOT_NAME}` placeholders + one or more
+ * source documents (registration certs, articles, etc.), uses the local
+ * LLM to match values to slots, returns the filled text + per-slot map.
+ */
+export async function fillTemplate(
+    endpoint: AnonymizerEndpoint,
+    template: { filename: string; bytes: Buffer; contentType?: string },
+    sources: { filename: string; bytes: Buffer; contentType?: string }[],
+    options: {
+        slotsSchema?: Record<string, FillSlotSchemaEntry>;
+    } = {},
+): Promise<FillTemplateResult> {
+    if (sources.length === 0) {
+        throw new Error("fillTemplate: at least one source file required");
+    }
+    const form = new FormData();
+    form.append(
+        "template_file",
+        new Blob([new Uint8Array(template.bytes)], {
+            type: template.contentType ?? "application/octet-stream",
+        }),
+        template.filename,
+    );
+    for (const sf of sources) {
+        form.append(
+            "source_files",
+            new Blob([new Uint8Array(sf.bytes)], {
+                type: sf.contentType ?? "application/octet-stream",
+            }),
+            sf.filename,
+        );
+    }
+    if (options.slotsSchema && Object.keys(options.slotsSchema).length > 0) {
+        form.append("slots_schema", JSON.stringify(options.slotsSchema));
+    }
+
+    const r = await fetch(`${endpoint.url}/fill_template`, {
+        method: "POST",
+        headers: { ...authHeader() },
+        body: form,
+    });
+    if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        throw new AnonymizerHttpError(
+            `fill_template failed on ${endpoint.name}: HTTP ${r.status}: ${detail.slice(0, 200)}`,
+            r.status,
+            endpoint,
+        );
+    }
+    const data = (await r.json()) as {
+        slot_values: Record<string, string | null>;
+        filled_text: string;
+        unresolved_slots: string[];
+        sources_used: string[];
+        latency_ms: number;
+        model: string;
+    };
+    return {
+        slotValues: data.slot_values,
+        filledText: data.filled_text,
+        unresolvedSlots: data.unresolved_slots,
+        sourcesUsed: data.sources_used,
+        latencyMs: data.latency_ms,
+        model: data.model,
         executedOn: endpointToExecutedOn(endpoint.name),
     };
 }

@@ -94,3 +94,31 @@ export interface RoutingHealth {
     macmini: HealthReport;
     chosenWhenAuto: ExecutedOn | null;
 }
+
+export interface OcrResult {
+    bytes: Buffer;
+    contentType: string;
+    /** "done" if OCR ran, "skipped" if the PDF already had a text layer. */
+    status: "done" | "skipped";
+    reason?: string;
+    languagesUsed?: string;
+    latencyMs?: number;
+    executedOn: ExecutedOn;
+}
+
+/** One slot in a contract template, e.g. {SELLER_NAME}. */
+export interface FillSlotSchemaEntry {
+    type?: string;
+    role?: string;
+    hint?: string;
+}
+
+export interface FillTemplateResult {
+    slotValues: Record<string, string | null>;
+    filledText: string;
+    unresolvedSlots: string[];
+    sourcesUsed: string[];
+    latencyMs: number;
+    model: string;
+    executedOn: ExecutedOn;
+}

@@ -3356,12 +3356,16 @@ export async function buildDocContext(
 
     const ids = [...documentIds];
     if (ids.length > 0) {
+        // Vault docs are explicitly walled off from chat context. Even if a
+        // doc ID is referenced from a user message or prior assistant event,
+        // we silently drop it here so the LLM has no path to its bytes.
         const { data: docs } = await db
             .from("documents")
-            .select("id, filename, file_type, current_version_id, status")
+            .select("id, filename, file_type, current_version_id, status, confidentiality")
             .in("id", ids)
             .eq("user_id", userId)
-            .eq("status", "ready");
+            .eq("status", "ready")
+            .neq("confidentiality", "vault");
 
         const docList = (docs ?? []) as unknown as {
             id: string;
@@ -3417,10 +3421,11 @@ export async function buildProjectDocContext(
         db
             .from("documents")
             .select(
-                "id, filename, file_type, current_version_id, status, folder_id",
+                "id, filename, file_type, current_version_id, status, folder_id, confidentiality",
             )
             .eq("project_id", projectId)
             .eq("status", "ready")
+            .neq("confidentiality", "vault")
             .order("created_at", { ascending: true }),
         db
             .from("project_subfolders")

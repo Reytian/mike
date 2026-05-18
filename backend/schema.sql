@@ -107,8 +107,30 @@ create table if not exists public.documents (
   structure_tree jsonb,
   status text not null default 'pending',
   folder_id uuid references public.project_subfolders(id) on delete set null,
+  -- 'shared': visible to chat tools / cloud LLM
+  -- 'vault':  local-only; buildDocContext + every chat tool skip these
+  -- 'template': empty form or contract template; visible to chat tools but
+  --   tagged so the UI can offer "Fill from vault" actions.
+  confidentiality text not null default 'shared',
+  -- OCR pipeline state, set on upload for PDFs.
+  -- 'pending' | 'skipped' (text layer present) | 'done' | 'failed'
+  ocr_status text,
+  ocr_text_layer_present boolean,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  constraint documents_confidentiality_check
+    check (confidentiality = any (array[
+      'shared'::text,
+      'vault'::text,
+      'template'::text
+    ])),
+  constraint documents_ocr_status_check
+    check (ocr_status is null or ocr_status = any (array[
+      'pending'::text,
+      'skipped'::text,
+      'done'::text,
+      'failed'::text
+    ]))
 );
 
 create index if not exists idx_documents_user_project
@@ -116,6 +138,9 @@ create index if not exists idx_documents_user_project
 
 create index if not exists idx_documents_project_folder
   on public.documents(project_id, folder_id);
+
+create index if not exists documents_confidentiality_idx
+  on public.documents(user_id, confidentiality);
 
 create table if not exists public.document_versions (
   id uuid primary key default gen_random_uuid(),
