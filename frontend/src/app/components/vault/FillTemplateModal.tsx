@@ -10,6 +10,7 @@ import {
     Lock,
     ShieldCheck,
     Upload,
+    UserSquare2,
     X,
 } from "lucide-react";
 import {
@@ -22,11 +23,13 @@ import {
     uploadStandaloneDocument,
 } from "@/app/lib/mikeApi";
 import type { MikeDocument } from "@/app/components/shared/types";
+import type { ClientProfile } from "@/app/lib/profileApi";
 
 interface Props {
     open: boolean;
     onClose: () => void;
     vaultDocs: VaultDocument[];
+    profiles?: ClientProfile[];
 }
 
 /**
@@ -34,10 +37,16 @@ interface Props {
  * one or more vault docs as the data sources. Runs entirely through the
  * local LDA sidecar — no cloud calls.
  */
-export function FillTemplateModal({ open, onClose, vaultDocs }: Props) {
+export function FillTemplateModal({
+    open,
+    onClose,
+    vaultDocs,
+    profiles = [],
+}: Props) {
     const [templates, setTemplates] = useState<MikeDocument[]>([]);
     const [templateId, setTemplateId] = useState<string>("");
     const [sourceIds, setSourceIds] = useState<Set<string>>(new Set());
+    const [profileIds, setProfileIds] = useState<Set<string>>(new Set());
     const [running, setRunning] = useState(false);
     const [result, setResult] = useState<FillTemplateResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -69,6 +78,7 @@ export function FillTemplateModal({ open, onClose, vaultDocs }: Props) {
             setResult(null);
             setError(null);
             setSourceIds(new Set());
+            setProfileIds(new Set());
             setTemplateId("");
             setRunning(false);
         }
@@ -95,8 +105,11 @@ export function FillTemplateModal({ open, onClose, vaultDocs }: Props) {
     };
 
     const canRun = useMemo(
-        () => templateId !== "" && sourceIds.size > 0 && !running,
-        [templateId, sourceIds, running],
+        () =>
+            templateId !== "" &&
+            (sourceIds.size > 0 || profileIds.size > 0) &&
+            !running,
+        [templateId, sourceIds, profileIds, running],
     );
 
     const handleRun = async () => {
@@ -107,6 +120,7 @@ export function FillTemplateModal({ open, onClose, vaultDocs }: Props) {
             const r = await fillTemplate({
                 templateDocumentId: templateId,
                 sourceDocumentIds: [...sourceIds],
+                clientProfileIds: [...profileIds],
             });
             setResult(r);
         } catch (err) {
@@ -210,10 +224,63 @@ export function FillTemplateModal({ open, onClose, vaultDocs }: Props) {
                         </div>
                     </div>
 
+                    {/* Profiles (preferred when available) */}
+                    {profiles.length > 0 && (
+                        <div>
+                            <label className="mb-1 block text-xs font-medium text-gray-700">
+                                Client profiles{" "}
+                                <span className="text-gray-400">
+                                    (preferred — pre-edited)
+                                </span>
+                            </label>
+                            <div className="max-h-32 overflow-y-auto rounded-md border border-gray-200">
+                                {profiles.map((p) => {
+                                    const checked = profileIds.has(p.id);
+                                    return (
+                                        <label
+                                            key={p.id}
+                                            className={`flex cursor-pointer items-center gap-2 border-b border-gray-100 px-2.5 py-1.5 text-xs last:border-b-0 ${
+                                                checked
+                                                    ? "bg-emerald-50/60"
+                                                    : "hover:bg-gray-50"
+                                            }`}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={checked}
+                                                onChange={() => {
+                                                    const n = new Set(profileIds);
+                                                    if (checked) n.delete(p.id);
+                                                    else n.add(p.id);
+                                                    setProfileIds(n);
+                                                }}
+                                                className="h-3 w-3 accent-emerald-600"
+                                            />
+                                            <UserSquare2 className="h-3 w-3 text-emerald-600" />
+                                            <span className="flex-1 truncate text-gray-800">
+                                                {p.label}
+                                            </span>
+                                            {p.jurisdiction && (
+                                                <span className="text-[10px] text-gray-400">
+                                                    {p.jurisdiction}
+                                                </span>
+                                            )}
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Source docs */}
                     <div>
                         <label className="mb-1 block text-xs font-medium text-gray-700">
                             Source documents (vault)
+                            {profiles.length > 0 && (
+                                <span className="ml-1 text-gray-400">
+                                    (or combine with profiles above)
+                                </span>
+                            )}
                         </label>
                         {vaultDocs.length === 0 ? (
                             <div className="rounded-md border border-dashed border-gray-200 px-3 py-4 text-center text-xs text-gray-400">

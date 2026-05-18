@@ -12,6 +12,8 @@ import {
     AlertCircle,
     CheckCircle2,
     ShieldCheck,
+    UserSquare2,
+    Edit3,
 } from "lucide-react";
 import {
     deleteVaultDocument,
@@ -20,7 +22,13 @@ import {
     uploadVaultDocument,
     type VaultDocument,
 } from "@/app/lib/vaultApi";
+import {
+    deleteProfile,
+    listProfiles,
+    type ClientProfile,
+} from "@/app/lib/profileApi";
 import { FillTemplateModal } from "@/app/components/vault/FillTemplateModal";
+import { ProfileEditor } from "@/app/components/vault/ProfileEditor";
 
 function bytesToHuman(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -67,17 +75,26 @@ function OcrBadge({ doc }: { doc: VaultDocument }) {
 
 export default function VaultPage() {
     const [docs, setDocs] = useState<VaultDocument[]>([]);
+    const [profiles, setProfiles] = useState<ClientProfile[]>([]);
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [fillOpen, setFillOpen] = useState(false);
+    const [profileOpen, setProfileOpen] = useState(false);
+    const [editingProfile, setEditingProfile] = useState<ClientProfile | null>(
+        null,
+    );
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const refresh = async () => {
         setLoading(true);
         try {
-            const list = await listVaultDocuments();
-            setDocs(list);
+            const [d, p] = await Promise.all([
+                listVaultDocuments(),
+                listProfiles(),
+            ]);
+            setDocs(d);
+            setProfiles(p);
         } catch (err) {
             setError((err as Error).message);
         } finally {
@@ -146,6 +163,17 @@ export default function VaultPage() {
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
+                        onClick={() => {
+                            setEditingProfile(null);
+                            setProfileOpen(true);
+                        }}
+                        className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100"
+                    >
+                        <UserSquare2 className="h-3.5 w-3.5" />
+                        New profile
+                    </button>
+                    <button
+                        type="button"
                         onClick={() => setFillOpen(true)}
                         className="flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-800 hover:bg-emerald-100"
                     >
@@ -183,6 +211,93 @@ export default function VaultPage() {
                 </div>
             )}
 
+            {/* Profiles */}
+            {profiles.length > 0 && (
+                <div className="mb-6">
+                    <h2 className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                        <UserSquare2 className="h-3.5 w-3.5" />
+                        Client profiles
+                    </h2>
+                    <div className="overflow-hidden rounded-lg border border-gray-100">
+                        <ul className="divide-y divide-gray-100">
+                            {profiles.map((p) => (
+                                <li
+                                    key={p.id}
+                                    className="flex items-center gap-3 px-4 py-2 hover:bg-gray-50"
+                                >
+                                    <UserSquare2 className="h-4 w-4 text-emerald-600" />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setEditingProfile(p);
+                                            setProfileOpen(true);
+                                        }}
+                                        className="flex-1 truncate text-left text-sm text-gray-800 hover:text-emerald-700 hover:underline"
+                                    >
+                                        {p.label}
+                                    </button>
+                                    {p.jurisdiction && (
+                                        <span className="text-xs text-gray-400">
+                                            {p.jurisdiction}
+                                        </span>
+                                    )}
+                                    <span className="text-xs text-gray-300">
+                                        {new Date(
+                                            p.updated_at,
+                                        ).toLocaleDateString(undefined, {
+                                            month: "short",
+                                            day: "numeric",
+                                        })}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setEditingProfile(p);
+                                            setProfileOpen(true);
+                                        }}
+                                        className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+                                        aria-label={`Edit ${p.label}`}
+                                    >
+                                        <Edit3 className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={async () => {
+                                            if (
+                                                !confirm(
+                                                    `Delete profile "${p.label}"?`,
+                                                )
+                                            )
+                                                return;
+                                            try {
+                                                await deleteProfile(p.id);
+                                                setProfiles((prev) =>
+                                                    prev.filter(
+                                                        (x) => x.id !== p.id,
+                                                    ),
+                                                );
+                                            } catch (err) {
+                                                setError(
+                                                    (err as Error).message,
+                                                );
+                                            }
+                                        }}
+                                        className="rounded-md p-1 text-gray-400 hover:bg-rose-50 hover:text-rose-600"
+                                        aria-label={`Delete ${p.label}`}
+                                    >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            )}
+
+            <h2 className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+                <Lock className="h-3.5 w-3.5" />
+                Source documents
+            </h2>
             <div className="overflow-hidden rounded-lg border border-gray-100">
                 {loading ? (
                     <div className="flex items-center justify-center py-12 text-sm text-gray-400">
@@ -243,6 +358,16 @@ export default function VaultPage() {
                 open={fillOpen}
                 onClose={() => setFillOpen(false)}
                 vaultDocs={docs}
+                profiles={profiles}
+            />
+            <ProfileEditor
+                open={profileOpen}
+                onClose={() => setProfileOpen(false)}
+                vaultDocs={docs}
+                existing={editingProfile}
+                onSaved={async () => {
+                    await refresh();
+                }}
             />
         </div>
     );

@@ -37,10 +37,14 @@ import { singleFileUpload } from "../lib/upload";
 import { loadActiveVersion } from "../lib/documentVersions";
 import {
     AnonymizerUnavailableError,
+    routedExtractProfile,
     routedFillTemplate,
     routedOcr,
 } from "../lib/anonymizer/routing";
-import type { FillSlotSchemaEntry } from "../lib/anonymizer/types";
+import type {
+    ExtractedProfile,
+    FillSlotSchemaEntry,
+} from "../lib/anonymizer/types";
 
 export const vaultRouter = Router();
 
@@ -343,8 +347,73 @@ vaultRouter.patch(
 interface FillTemplateBody {
     template_document_id?: unknown;
     source_document_ids?: unknown;
+    client_profile_ids?: unknown;
     slots_schema?: unknown;
     target?: unknown;
+}
+
+interface ProfileExtractBody {
+    source_document_ids?: unknown;
+    jurisdiction_hint?: unknown;
+}
+
+interface ProfileSaveBody {
+    label?: unknown;
+    jurisdiction?: unknown;
+    data?: unknown;
+    source_document_ids?: unknown;
+    notes?: unknown;
+}
+
+interface ProfileRow {
+    id: string;
+    user_id: string;
+    label: string;
+    jurisdiction: string | null;
+    data: ExtractedProfile;
+    source_document_ids: string[] | null;
+    notes: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+/**
+ * Render a structured profile to markdown the slot resolver can read as
+ * if it were any other source document. Order is stable so the LLM can
+ * rely on consistent positioning.
+ */
+function profileToMarkdown(label: string, data: ExtractedProfile): string {
+    const lines: string[] = [`# Client profile: ${label}`, ""];
+    const push = (k: string, v: unknown) => {
+        if (v == null || v === "") return;
+        if (Array.isArray(v)) {
+            if (v.length === 0) return;
+            lines.push(`- **${k}:**`);
+            for (const item of v) lines.push(`  - ${String(item)}`);
+        } else {
+            lines.push(`- **${k}:** ${String(v)}`);
+        }
+    };
+    push("Name", data.name);
+    push("Name (Chinese)", data.name_zh);
+    push("Registration number", data.registration_number);
+    push("Jurisdiction", data.jurisdiction);
+    push("Entity type", data.entity_type);
+    push("Registered office", data.registered_office);
+    push("Date incorporated", data.date_incorporated);
+    push("Authorized capital", data.authorized_capital);
+    push("Directors", data.directors);
+    push("Shareholders", data.shareholders);
+    push("Officers", data.officers);
+    push("Business scope", data.business_scope);
+    push("Tax ID", data.tax_id);
+    if (data.additional && Object.keys(data.additional).length > 0) {
+        lines.push("- **Additional:**");
+        for (const [k, v] of Object.entries(data.additional)) {
+            lines.push(`  - ${k}: ${JSON.stringify(v)}`);
+        }
+    }
+    return lines.join("\n");
 }
 
 vaultRouter.post("/vault/fill-template", requireAuth, async (req, res) => {
@@ -357,23 +426,27 @@ vaultRouter.post("/vault/fill-template", requireAuth, async (req, res) => {
 
     const templateId = body.template_document_id;
     const sourceIds = body.source_document_ids;
+    const profileIds = body.client_profile_ids;
     if (typeof templateId !== "string" || !templateId) {
         return void res
             .status(400)
             .json({ detail: "template_document_id required" });
     }
-    if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
-        return void res
-            .status(400)
-            .json({ detail: "source_document_ids[] required (non-empty)" });
-    }
-    const cleanSourceIds = sourceIds.filter(
-        (s): s is string => typeof s === "string" && s.length > 0,
-    );
-    if (cleanSourceIds.length === 0) {
-        return void res
-            .status(400)
-            .json({ detail: "source_document_ids[] required (non-empty)" });
+    const cleanSourceIds = Array.isArray(sourceIds)
+        ? sourceIds.filter(
+              (s): s is string => typeof s === "string" && s.length > 0,
+          )
+        : [];
+    const cleanProfileIds = Array.isArray(profileIds)
+        ? profileIds.filter(
+              (s): s is string => typeof s === "string" && s.length > 0,
+          )
+        : [];
+    if (cleanSourceIds.length === 0 && cleanProfileIds.length === 0) {
+        return void res.status(400).json({
+            detail:
+                "at least one of source_document_ids[] or client_profile_ids[] required",
+        });
     }
 
     // Permitted slots_schema shape: Record<slot, {type?, role?, hint?}>
@@ -410,29 +483,53 @@ vaultRouter.post("/vault/fill-template", requireAuth, async (req, res) => {
 
     // Access-check + load each source doc. Sources may be vault docs (the
     // common case) — vault-only access is enforced by user ownership.
-    const { data: sourceDocs } = await db
-        .from("documents")
-        .select("id, filename, file_type, user_id, project_id, confidentiality")
-        .in("id", cleanSourceIds);
     const sources: { filename: string; bytes: Buffer; contentType: string }[] =
         [];
-    for (const sd of sourceDocs ?? []) {
-        const access = await ensureDocAccess(sd, userId, userEmail, db);
-        if (!access.ok) continue;
-        const active = await loadActiveVersion(sd.id as string, db);
-        if (!active) continue;
-        const buf = await downloadFile(active.storage_path);
-        if (!buf) continue;
-        sources.push({
-            filename: sd.filename as string,
-            bytes: Buffer.from(buf),
-            contentType: contentTypeFor(extOf(sd.filename as string)),
-        });
+    if (cleanSourceIds.length > 0) {
+        const { data: sourceDocs } = await db
+            .from("documents")
+            .select(
+                "id, filename, file_type, user_id, project_id, confidentiality",
+            )
+            .in("id", cleanSourceIds);
+        for (const sd of sourceDocs ?? []) {
+            const access = await ensureDocAccess(sd, userId, userEmail, db);
+            if (!access.ok) continue;
+            const active = await loadActiveVersion(sd.id as string, db);
+            if (!active) continue;
+            const buf = await downloadFile(active.storage_path);
+            if (!buf) continue;
+            sources.push({
+                filename: sd.filename as string,
+                bytes: Buffer.from(buf),
+                contentType: contentTypeFor(extOf(sd.filename as string)),
+            });
+        }
     }
+
+    // Load each profile + render it to markdown as a virtual source file.
+    // The slot resolver doesn't know the difference between a real source
+    // doc and a profile-rendered markdown — both are just text it scans.
+    if (cleanProfileIds.length > 0) {
+        const { data: profileRows } = await db
+            .from("client_profiles")
+            .select("*")
+            .in("id", cleanProfileIds)
+            .eq("user_id", userId);
+        for (const p of (profileRows ?? []) as ProfileRow[]) {
+            const md = profileToMarkdown(p.label, p.data);
+            sources.push({
+                filename: `profile-${p.label.replace(/[^a-z0-9\-]/gi, "_")}.md`,
+                bytes: Buffer.from(md, "utf-8"),
+                contentType: "text/markdown; charset=utf-8",
+            });
+        }
+    }
+
     if (sources.length === 0) {
         return void res.status(400).json({
             detail:
-                "no readable source documents (check that source_document_ids exist and are accessible)",
+                "no readable sources (check that source_document_ids / client_profile_ids exist and belong to you)",
         });
     }
 
@@ -490,4 +587,189 @@ vaultRouter.post("/vault/fill-template", requireAuth, async (req, res) => {
         }
         res.status(500).json({ detail: (err as Error).message });
     }
+});
+
+// ---------------------------------------------------------------------------
+// Client profile routes
+// ---------------------------------------------------------------------------
+
+// POST /vault/profiles/extract
+//   { source_document_ids: string[], jurisdiction_hint?: string }
+//   → preview of the extracted profile (NOT persisted). Caller saves with
+//   POST /vault/profiles once they've reviewed/edited.
+vaultRouter.post("/vault/profiles/extract", requireAuth, async (req, res) => {
+    const userId = res.locals.userId as string;
+    const userEmail = res.locals.userEmail as string | undefined;
+    const body = (req.body && typeof req.body === "object"
+        ? (req.body as ProfileExtractBody)
+        : {}) as ProfileExtractBody;
+    const sourceIds = Array.isArray(body.source_document_ids)
+        ? body.source_document_ids.filter(
+              (s): s is string => typeof s === "string" && s.length > 0,
+          )
+        : [];
+    if (sourceIds.length === 0) {
+        return void res
+            .status(400)
+            .json({ detail: "source_document_ids[] required" });
+    }
+    const jurisdictionHint =
+        typeof body.jurisdiction_hint === "string"
+            ? body.jurisdiction_hint
+            : undefined;
+    const db = createServerSupabase();
+
+    const { data: docs } = await db
+        .from("documents")
+        .select("id, filename, file_type, user_id, project_id, confidentiality")
+        .in("id", sourceIds);
+    const sources: { filename: string; bytes: Buffer; contentType: string }[] =
+        [];
+    for (const d of docs ?? []) {
+        const access = await ensureDocAccess(d, userId, userEmail, db);
+        if (!access.ok) continue;
+        const active = await loadActiveVersion(d.id as string, db);
+        if (!active) continue;
+        const buf = await downloadFile(active.storage_path);
+        if (!buf) continue;
+        sources.push({
+            filename: d.filename as string,
+            bytes: Buffer.from(buf),
+            contentType: contentTypeFor(extOf(d.filename as string)),
+        });
+    }
+    if (sources.length === 0) {
+        return void res
+            .status(400)
+            .json({ detail: "no readable source documents" });
+    }
+    try {
+        const result = await routedExtractProfile(sources, {
+            jurisdictionHint,
+        });
+        res.json({
+            profile: result.profile,
+            sources_used: result.sourcesUsed,
+            latency_ms: result.latencyMs,
+            model: result.model,
+            executed_on: result.executedOn,
+        });
+    } catch (err) {
+        if (err instanceof AnonymizerUnavailableError)
+            return handle503(res, err);
+        res.status(500).json({ detail: (err as Error).message });
+    }
+});
+
+// GET /vault/profiles — list
+vaultRouter.get("/vault/profiles", requireAuth, async (_req, res) => {
+    const userId = res.locals.userId as string;
+    const db = createServerSupabase();
+    const { data, error } = await db
+        .from("client_profiles")
+        .select("*")
+        .eq("user_id", userId)
+        .order("updated_at", { ascending: false });
+    if (error) return void res.status(500).json({ detail: error.message });
+    res.json(data ?? []);
+});
+
+// POST /vault/profiles — save a new one
+vaultRouter.post("/vault/profiles", requireAuth, async (req, res) => {
+    const userId = res.locals.userId as string;
+    const body = (req.body && typeof req.body === "object"
+        ? (req.body as ProfileSaveBody)
+        : {}) as ProfileSaveBody;
+    const label = typeof body.label === "string" ? body.label.trim() : "";
+    if (!label) {
+        return void res.status(400).json({ detail: "label required" });
+    }
+    const jurisdiction =
+        typeof body.jurisdiction === "string" ? body.jurisdiction : null;
+    const data: ExtractedProfile =
+        body.data && typeof body.data === "object"
+            ? (body.data as ExtractedProfile)
+            : { name: label };
+    const sourceDocumentIds = Array.isArray(body.source_document_ids)
+        ? body.source_document_ids.filter(
+              (s): s is string => typeof s === "string" && s.length > 0,
+          )
+        : [];
+    const notes = typeof body.notes === "string" ? body.notes : null;
+
+    const db = createServerSupabase();
+    const { data: row, error } = await db
+        .from("client_profiles")
+        .insert({
+            user_id: userId,
+            label,
+            jurisdiction,
+            data,
+            source_document_ids: sourceDocumentIds,
+            notes,
+        })
+        .select("*")
+        .single();
+    if (error || !row) {
+        return void res
+            .status(500)
+            .json({ detail: error?.message ?? "insert failed" });
+    }
+    res.status(201).json(row);
+});
+
+// PATCH /vault/profiles/:id — update fields
+vaultRouter.patch("/vault/profiles/:id", requireAuth, async (req, res) => {
+    const userId = res.locals.userId as string;
+    const { id } = req.params;
+    const body = (req.body && typeof req.body === "object"
+        ? (req.body as ProfileSaveBody)
+        : {}) as ProfileSaveBody;
+    const update: Record<string, unknown> = {
+        updated_at: new Date().toISOString(),
+    };
+    if (typeof body.label === "string" && body.label.trim()) {
+        update.label = body.label.trim();
+    }
+    if (typeof body.jurisdiction === "string" || body.jurisdiction === null) {
+        update.jurisdiction = body.jurisdiction;
+    }
+    if (body.data && typeof body.data === "object") {
+        update.data = body.data;
+    }
+    if (Array.isArray(body.source_document_ids)) {
+        update.source_document_ids = body.source_document_ids.filter(
+            (s): s is string => typeof s === "string" && s.length > 0,
+        );
+    }
+    if (typeof body.notes === "string" || body.notes === null) {
+        update.notes = body.notes;
+    }
+    const db = createServerSupabase();
+    const { data: row, error } = await db
+        .from("client_profiles")
+        .update(update)
+        .eq("id", id)
+        .eq("user_id", userId)
+        .select("*")
+        .single();
+    if (error || !row) {
+        return void res
+            .status(404)
+            .json({ detail: error?.message ?? "profile not found" });
+    }
+    res.json(row);
+});
+
+// DELETE /vault/profiles/:id
+vaultRouter.delete("/vault/profiles/:id", requireAuth, async (req, res) => {
+    const userId = res.locals.userId as string;
+    const { id } = req.params;
+    const db = createServerSupabase();
+    await db
+        .from("client_profiles")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", userId);
+    res.status(204).send();
 });

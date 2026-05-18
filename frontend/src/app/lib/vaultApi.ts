@@ -111,7 +111,8 @@ export async function setDocumentConfidentiality(
 
 export async function fillTemplate(payload: {
     templateDocumentId: string;
-    sourceDocumentIds: string[];
+    sourceDocumentIds?: string[];
+    clientProfileIds?: string[];
     slotsSchema?: Record<string, { type?: string; role?: string; hint?: string }>;
 }): Promise<FillTemplateResponse> {
     return api<FillTemplateResponse>("/vault/fill-template", {
@@ -119,7 +120,8 @@ export async function fillTemplate(payload: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             template_document_id: payload.templateDocumentId,
-            source_document_ids: payload.sourceDocumentIds,
+            source_document_ids: payload.sourceDocumentIds ?? [],
+            client_profile_ids: payload.clientProfileIds ?? [],
             slots_schema: payload.slotsSchema,
         }),
     });

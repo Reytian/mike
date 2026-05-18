@@ -15,6 +15,7 @@ import {
     anonymize as clientAnonymize,
     checkHealth as clientCheckHealth,
     deanonymize as clientDeanonymize,
+    extractProfile as clientExtractProfile,
     fillTemplate as clientFillTemplate,
     ocrPdf as clientOcrPdf,
     scan as clientScan,
@@ -26,6 +27,7 @@ import type {
     AnonymizeResult,
     DeanonymizeResult,
     ExecutedOn,
+    ExtractProfileResult,
     FillSlotSchemaEntry,
     FillTemplateResult,
     HealthReport,
@@ -243,6 +245,21 @@ export async function routedFillTemplate(
     return runWithFallback(target, (endpoint) =>
         clientFillTemplate(endpoint, template, sources, {
             slotsSchema: options.slotsSchema,
+        }),
+    );
+}
+
+export async function routedExtractProfile(
+    sources: { filename: string; bytes: Buffer; contentType?: string }[],
+    options: {
+        target?: AnonymizerTarget;
+        jurisdictionHint?: string;
+    } = {},
+): Promise<ExtractProfileResult> {
+    const target = options.target ?? "auto";
+    return runWithFallback(target, (endpoint) =>
+        clientExtractProfile(endpoint, sources, {
+            jurisdictionHint: options.jurisdictionHint,
         }),
     );
 }

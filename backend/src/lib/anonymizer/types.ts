@@ -122,3 +122,28 @@ export interface FillTemplateResult {
     model: string;
     executedOn: ExecutedOn;
 }
+
+export interface ExtractedProfile {
+    name: string | null;
+    name_zh?: string | null;
+    registration_number?: string | null;
+    jurisdiction?: string | null;
+    entity_type?: string | null;
+    registered_office?: string | null;
+    date_incorporated?: string | null;
+    authorized_capital?: string | null;
+    directors?: string[];
+    shareholders?: string[];
+    officers?: string[];
+    business_scope?: string | null;
+    tax_id?: string | null;
+    additional?: Record<string, unknown>;
+}
+
+export interface ExtractProfileResult {
+    profile: ExtractedProfile;
+    sourcesUsed: string[];
+    latencyMs: number;
+    model: string;
+    executedOn: ExecutedOn;
+}

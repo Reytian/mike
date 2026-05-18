@@ -182,6 +182,25 @@ create index if not exists document_versions_doc_vnum_idx
 create index if not exists document_versions_source_version_idx
   on public.document_versions(source_version_id);
 
+-- Structured client profile: extracted once from vault docs, edited for
+-- accuracy, reused for every template-fill. `data` jsonb carries the
+-- well-known fields (name, registration_number, registered_office,
+-- directors[], etc.) plus a per-jurisdiction `additional` sub-object.
+create table if not exists public.client_profiles (
+    id uuid primary key default gen_random_uuid(),
+    user_id text not null,
+    label text not null,
+    jurisdiction text,
+    data jsonb not null default '{}'::jsonb,
+    source_document_ids uuid[] not null default '{}'::uuid[],
+    notes text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists client_profiles_user_idx
+    on public.client_profiles(user_id);
+
 alter table public.documents
   add column if not exists current_version_id uuid
   references public.document_versions(id) on delete set null;
@@ -405,3 +424,4 @@ revoke all on public.tabular_cells from anon, authenticated;
 revoke all on public.tabular_review_chats from anon, authenticated;
 revoke all on public.tabular_review_chat_messages from anon, authenticated;
 revoke all on public.user_api_keys from anon, authenticated;
+revoke all on public.client_profiles from anon, authenticated;

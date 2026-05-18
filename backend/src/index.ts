@@ -114,6 +114,7 @@ app.post("/projects/:projectId/documents", uploadLimiter);
 // rate-limit them like other expensive endpoints.
 app.post("/vault/documents", uploadLimiter);
 app.post("/vault/fill-template", chatLimiter);
+app.post("/vault/profiles/extract", chatLimiter);
 
 app.use("/chat", chatRouter);
 app.use("/projects", projectsRouter);

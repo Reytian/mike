@@ -12,6 +12,8 @@ import type {
     AnonymizedFile,
     DeanonymizeResult,
     ExecutedOn,
+    ExtractedProfile,
+    ExtractProfileResult,
     FillSlotSchemaEntry,
     FillTemplateResult,
     HealthReport,
@@ -394,6 +396,58 @@ export async function fillTemplate(
         slotValues: data.slot_values,
         filledText: data.filled_text,
         unresolvedSlots: data.unresolved_slots,
+        sourcesUsed: data.sources_used,
+        latencyMs: data.latency_ms,
+        model: data.model,
+        executedOn: endpointToExecutedOn(endpoint.name),
+    };
+}
+
+/**
+ * POST /extract_profile — structured client profile from vault docs.
+ */
+export async function extractProfile(
+    endpoint: AnonymizerEndpoint,
+    sources: { filename: string; bytes: Buffer; contentType?: string }[],
+    options: { jurisdictionHint?: string } = {},
+): Promise<ExtractProfileResult> {
+    if (sources.length === 0) {
+        throw new Error("extractProfile: at least one source file required");
+    }
+    const form = new FormData();
+    for (const sf of sources) {
+        form.append(
+            "source_files",
+            new Blob([new Uint8Array(sf.bytes)], {
+                type: sf.contentType ?? "application/octet-stream",
+            }),
+            sf.filename,
+        );
+    }
+    if (options.jurisdictionHint) {
+        form.append("jurisdiction_hint", options.jurisdictionHint);
+    }
+    const r = await fetch(`${endpoint.url}/extract_profile`, {
+        method: "POST",
+        headers: { ...authHeader() },
+        body: form,
+    });
+    if (!r.ok) {
+        const detail = await r.text().catch(() => "");
+        throw new AnonymizerHttpError(
+            `extract_profile failed on ${endpoint.name}: HTTP ${r.status}: ${detail.slice(0, 200)}`,
+            r.status,
+            endpoint,
+        );
+    }
+    const data = (await r.json()) as {
+        profile: ExtractedProfile;
+        sources_used: string[];
+        latency_ms: number;
+        model: string;
+    };
+    return {
+        profile: data.profile,
         sourcesUsed: data.sources_used,
         latencyMs: data.latency_ms,
         model: data.model,
